@@ -26,6 +26,15 @@ import torchvision.models as models
 
 from reshape import reshape_model
 from datasets import FaceDataset
+from datasets.label_image import LabelImage
+try:
+    from apex.parallel import DistributedDataParallel as DDP
+    from apex.fp16_utils import *
+    from apex import amp, optimizers
+    from apex.multi_tensor_apply import multi_tensor_applier
+except ImportError:
+    raise ImportError("Please install apex from https://www.github.com/nvidia/apex to run this example.")
+
 
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
@@ -90,6 +99,9 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'N processes per node, which has N GPUs. This is the '
                          'fastest way to use PyTorch for either single node or '
                          'multi node data parallel training')
+parser.add_argument('--data', default="FaceDataset", type=str,
+                    help='set dataset type {FaceDataset, LabelImg}')
+parser.add_argument('--amp', help='set amp', action="store_true")
 
 #best_acc1 = 0
 best_loss = 1000000
@@ -159,29 +171,46 @@ def main_worker(gpu, ngpus_per_node, args):
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
 
-    train_dataset = FaceDataset(
-        root_dir='../originalPics',
-        fold_dir='../FDDB-folds',
-        fold_range=range(1,11),
-        transform=transforms.Compose([
-            transforms.Resize((args.resolution, args.resolution)),
-            #transforms.RandomResizedCrop(args.resolution),
-            #transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            normalize,
-        ]))
+    if args.data == "FaceDataset":
+        train_dataset = FaceDataset(
+            root_dir='datasets/raw/originalPics',
+            fold_dir='datasets/raw/FDDB-folds',
+            fold_range=range(1,11),
+            transform=transforms.Compose([
+                transforms.Resize((args.resolution, args.resolution)),
+                #transforms.RandomResizedCrop(args.resolution),
+                #transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                normalize,
+            ]))
 
-    val_dataset = FaceDataset(
-        root_dir='../originalPics',
-        fold_dir='../FDDB-folds',
-        fold_range=range(1,11),
-        transform=transforms.Compose([
-            transforms.Resize((args.resolution, args.resolution)),
-            #transforms.Resize(256),
-            #transforms.CenterCrop(args.resolution),
-            transforms.ToTensor(),
-            normalize,
-        ]))
+        val_dataset = FaceDataset(
+            root_dir='datasets/raw/originalPics',
+            fold_dir='datasets/raw/originalPics',
+            fold_range=range(1,11),
+            transform=transforms.Compose([
+                transforms.Resize((args.resolution, args.resolution)),
+                #transforms.Resize(256),
+                #transforms.CenterCrop(args.resolution),
+                transforms.ToTensor(),
+                normalize,
+            ]))
+    elif args.data == "LabelImg":
+        train_dataset = LabelImage(
+            data_dir='./datasets/raw/originalPicsAddLabel/',
+            transform=transforms.Compose([
+                transforms.Resize((args.resolution, args.resolution)),
+                transforms.ToTensor(),
+                normalize,
+            ]))
+
+        val_dataset = LabelImage(
+            data_dir='./datasets/raw/originalPicsAddLabel/',
+            transform=transforms.Compose([
+                transforms.Resize((args.resolution, args.resolution)),
+                transforms.ToTensor(),
+                normalize,
+            ]))
 
     output_dims = train_dataset.output_dims()
 
@@ -226,12 +255,18 @@ def main_worker(gpu, ngpus_per_node, args):
             # ourselves based on the total number of GPUs we have
             args.batch_size = int(args.batch_size / ngpus_per_node)
             args.workers = int(args.workers / ngpus_per_node)
-            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+            if args.amp:
+                model = DDP(model, delay_allreduce=True, device_ids=[args.gpu])
+            else:
+                model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
         else:
             model.cuda()
             # DistributedDataParallel will divide and allocate batch_size to all
             # available GPUs if device_ids are not set
-            model = torch.nn.parallel.DistributedDataParallel(model)
+            if args.amp:
+                model = DDP(model, delay_allreduce=True)
+            else:
+                model = torch.nn.parallel.DistributedDataParallel(model)
     elif args.gpu is not None:
         torch.cuda.set_device(args.gpu)
         model = model.cuda(args.gpu)
@@ -276,6 +311,10 @@ def main_worker(gpu, ngpus_per_node, args):
         validate(val_loader, model, criterion, output_dims, args)
         return
 
+    if args.amp:
+        opt_level = 'O1'
+        model, optimizer = amp.initialize(model, optimizer, opt_level=opt_level)
+
     # train for the specified number of epochs
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
@@ -299,16 +338,29 @@ def main_worker(gpu, ngpus_per_node, args):
 
         if not args.multiprocessing_distributed or (args.multiprocessing_distributed
                 and args.rank % ngpus_per_node == 0):
-            save_checkpoint({
-                'epoch': epoch + 1,
-                'arch': args.arch,
-                'resolution': args.resolution,
-                'output_dims': output_dims,
-                'state_dict': model.state_dict(),
-                #'best_acc1': best_acc1,
-                'best_loss': best_loss,
-                'optimizer' : optimizer.state_dict(),
-            }, is_best, args)
+            if args.amp:
+                save_checkpoint({
+                    'epoch': epoch + 1,
+                    'arch': args.arch,
+                    'resolution': args.resolution,
+                    'output_dims': output_dims,
+                    'state_dict': model.state_dict(),
+                    #'best_acc1': best_acc1,
+                    'best_loss': best_loss,
+                    'optimizer' : optimizer.state_dict(),
+                    "amp": amp.state_dict()
+                }, is_best, args)
+            else:
+                save_checkpoint({
+                    'epoch': epoch + 1,
+                    'arch': args.arch,
+                    'resolution': args.resolution,
+                    'output_dims': output_dims,
+                    'state_dict': model.state_dict(),
+                    #'best_acc1': best_acc1,
+                    'best_loss': best_loss,
+                    'optimizer' : optimizer.state_dict(),
+                }, is_best, args)
 
 
 #
@@ -318,7 +370,7 @@ def train(train_loader, model, criterion, optimizer, epoch, output_dims, args):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
-    #top1 = AverageMeter('Acc@1', ':6.2f')
+    # top1 = AverageMeter('Acc@1', ':6.2f')
     progress = ProgressMeter(
         len(train_loader),
         [batch_time, data_time, losses], #[batch_time, data_time, losses, top1],
@@ -349,13 +401,17 @@ def train(train_loader, model, criterion, optimizer, epoch, output_dims, args):
         #print('loss   ' + str(loss))
 	
         # measure accuracy and record loss
-        #acc1 = accuracy(output, target, topk=(1, min(5, output_dims)))
+        # acc1 = accuracy(output, target, topk=(1, min(5, output_dims)))
         losses.update(loss.item(), images.size(0))
-        #top1.update(acc1[0], images.size(0))
+        # top1.update(acc1[0], images.size(0))
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
-        loss.backward()
+        if args.amp:
+            with amp.scale_loss(loss, optimizer) as scaled_loss:
+                 scaled_loss.backward()
+        else:
+            loss.backward()
         optimizer.step()
 
         # measure elapsed time
