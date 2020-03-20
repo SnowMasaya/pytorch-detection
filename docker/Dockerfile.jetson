@@ -1,0 +1,51 @@
+from nvcr.io/nvidia/l4t-base:r32.3.1 
+
+# PyTorch
+RUN wget https://nvidia.box.com/shared/static/ncgzus5o23uck9i5oth2n8n06k340l6k.whl -O torch-1.4.0-cp36-cp36m-linux_aarch64.whl
+RUN apt update -y && apt-get install -y python3-pip libopenblas-base libjpeg-dev zlib1g-dev
+RUN pip3 install Cython && pip3 install  numpy torch-1.4.0-cp36-cp36m-linux_aarch64.whl
+
+RUN apt install -y git openmpi-doc openmpi-bin libopenmpi-dev
+RUN apt update -y 
+
+RUN git clone --branch v0.5.0 https://github.com/pytorch/vision torchvision && cd torchvision && python3 setup.py install && cd ../ && pip3 install 'pillow<7'
+
+RUN git clone https://github.com/NVIDIA-AI-IOT/torch2trt && cd torch2trt && python3 setup.py install
+
+# OpenCV
+RUN apt-get update && apt-get install -y build-essential libgtk2.0-dev pkg-config libavcodec-dev libavformat-dev libswscale-dev 
+RUN apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev 
+RUN apt-get install -y python3.7-dev python-dev libtbb2 libtbb-dev libjpeg-dev libpng-dev libtiff-dev libdc1394-22-dev 
+RUN apt-get install -y v4l-utils qv4l2 v4l2ucp curl unzip cmake make
+
+RUN apt-get update
+
+RUN curl -L https://github.com/opencv/opencv/archive/4.1.2.zip -o opencv-4.1.2.zip
+RUN curl -L https://github.com/opencv/opencv_contrib/archive/4.1.2.zip -o opencv_contrib-4.1.2.zip
+RUN unzip opencv_contrib-4.1.2.zip && unzip opencv-4.1.2.zip 
+
+RUN cd opencv-4.1.2/ && mkdir release && cd release/ && \
+    cmake -D CMAKE_BUILD_TYPE=RELEASE \
+    -D CMAKE_INSTALL_PREFIX=/usr/local \
+    -D ENABLE_FAST_MATH=1 \
+    -D CUDA_FAST_MATH=1 \
+    -D WITH_OPENCL=off \
+    -D WITH_OPENCL_SVM=off \
+    -D WITH_OPENCLAMDFFT=off \
+    -D WITH_OPENCLAMDBLAS=off \
+    -D WITH_LIBV4L=ON \
+    -D BUILD_opencv_gpu=off \
+    -D BUILD_opencv_python3=ON \
+    .. && \
+    make -j4 && \
+    make install
+ENV LC_ALL=C.UTF-8
+ENV LANG=C.UTF-8
+RUN pip3 install matplotlib  
+
+# Install Python packages and pytorch
+ENV NB_USER pytorch
+ENV NB_UID 1000
+
+
+WORKDIR /workspace/pytorch_detection

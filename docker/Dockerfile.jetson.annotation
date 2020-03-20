@@ -1,0 +1,17 @@
+from nvcr.io/nvidia/l4t-base:r32.3.1 
+RUN apt-get update -y && apt-get install -y python3-pip pyqt5-dev-tools git
+RUN git clone https://github.com/tzutalin/labelImg /workspace/labelImg
+RUN cd /workspace/labelImg  pip3 install -r requirements/requirements-linux-python3.txt
+RUN apt-get install -y libxml2-dev libxslt1-dev cython3
+RUN pip3 install lxml
+RUN cd /workspace/labelImg && make qt5py3
+
+
+# Install Python packages and pytorch
+ENV NB_USER label_image 
+ENV NB_UID 1000
+
+ENV LC_ALL=C.UTF-8
+ENV LANG=C.UTF-8
+
+WORKDIR /workspace/labelImg
